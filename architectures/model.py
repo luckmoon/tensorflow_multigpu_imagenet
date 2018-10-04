@@ -4,6 +4,7 @@ from .densenet import *
 from .vgg import *
 from .nin import *
 from .googlenet import *
+from .deepspeech import *
 from .common import SAVE_VARIABLES
 
 """
@@ -32,7 +33,9 @@ class model:
       num_gpus: number of available GPUs
     """
 
-    def __init__(self, inputs, labels, loss, optimizer, wd, architecture, depth, num_classes, is_training, transfer_mode, top_n=5,
+    def __init__(self, inputs, labels, loss, optimizer, wd, architecture, depth, num_classes, num_chars, is_training, transfer_mode,
+                 max_seq_len, label_length_batch,
+                 top_n=5,
                  max_to_keep=5, num_gpus=1):
         self.architecture = architecture
         self.depth = depth
@@ -49,6 +52,7 @@ class model:
         self.top_n = top_n
         self.max_to_keep = max_to_keep
         self.num_gpus = num_gpus
+        self.num_chars = num_chars
 
     """
     Calculate the average gradient for each shared variable across all the GPUs.
@@ -101,14 +105,15 @@ class model:
         with tf.device(device):
             logits = self.inference()
             probabilities = tf.nn.softmax(logits, name='output')
-            # Top-1 accuracy
-            top1acc = tf.reduce_mean(tf.cast(tf.nn.in_top_k(logits, self.labels, 1), tf.float32))
-            # Top-n accuracy
-            topnacc = tf.reduce_mean(tf.cast(tf.nn.in_top_k(logits, self.labels, self.top_n), tf.float32))
+            # # Top-1 accuracy
+            # top1acc = tf.reduce_mean(tf.cast(tf.nn.in_top_k(logits, self.labels, 1), tf.float32))
+            # # Top-n accuracy
+            # topnacc = tf.reduce_mean(tf.cast(tf.nn.in_top_k(logits, self.labels, self.top_n), tf.float32))
 
             # Build the portion of the Graph calculating the losses. Note that we will
             # assemble the total_loss using a custom function below.
-            cross_entropy_mean = self.loss(logits, self.labels)
+            # cross_entropy_mean = self.loss(logits, self.labels)
+            ctc_loss = self.loss()
 
             # Get all the regularization lesses and add them
             regularization_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
@@ -122,9 +127,9 @@ class model:
             total_loss = tf.add(cross_entropy_mean, reg_loss)
 
             # Attach a scalar summary for the total loss and top-1 and top-5 accuracies
-            tf.summary.scalar('Total Loss', total_loss)
-            tf.summary.scalar('Top-1 Accuracy', top1acc)
-            tf.summary.scalar('Top-' + str(self.top_n) + ' Accuracy', topnacc)
+            # tf.summary.scalar('Total Loss', total_loss)
+            # tf.summary.scalar('Top-1 Accuracy', top1acc)
+            # tf.summary.scalar('Top-' + str(self.top_n) + ' Accuracy', topnacc)
             # Gather batch normaliziation update operations
             batchnorm_updates = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
             # Retain the summaries from the final tower.
@@ -134,7 +139,8 @@ class model:
             last_grads = self.optimizer.compute_gradients(total_loss, var_list=tf.get_collection(SAVE_VARIABLES, scope='output'))
             grads = self.optimizer.compute_gradients(total_loss)
 
-        return grads, last_grads, batchnorm_updates, cross_entropy_mean, top1acc, topnacc
+        # return grads, last_grads, batchnorm_updates, cross_entropy_mean, top1acc, topnacc
+        return grads, last_grads, batchnorm_updates, cross_entropy_mean
 
     """
       This methods calls get_grads method to build N towers for the multi-gpu scenario.
@@ -157,7 +163,8 @@ class model:
                     # Calculate the loss for one tower. This function
                     # constructs the entire model but shares the variables across
                     # all towers.
-                    grads, last_grads, batchnorm_updates, cross_entropy_mean, top1acc, topnacc = self.get_grads('/gpu:%d' % i)
+                    # grads, last_grads, batchnorm_updates, cross_entropy_mean, top1acc, topnacc = self.get_grads('/gpu:%d' % i)
+                    grads, last_grads, batchnorm_updates, cross_entropy_mean = self.get_grads('/gpu:%d' % i)
 
                     # Reuse variables for the next tower.
                     tf.get_variable_scope().reuse_variables()
@@ -170,7 +177,7 @@ class model:
                     tower_grads.append(grads)
         # average graidents blah blah blah
         return self.average_gradients(tower_grads), self.average_gradients(
-            tower_last_grads), batchnorm_updates, cross_entropy_mean, top1acc, topnacc
+            tower_last_grads), batchnorm_updates, cross_entropy_mean
 
     """
       Calculate the average gradient for each shared variable across all the GPUs.
@@ -183,9 +190,9 @@ class model:
 
     def train_ops(self):
         if self.num_gpus == 1:
-            grads, last_grads, batchnorm_updates, cross_entropy_mean, top1acc, topnacc = self.get_grads('/gpu:0')
+            grads, last_grads, batchnorm_updates, cross_entropy_mean = self.get_grads('/gpu:0')
         else:
-            grads, last_grads, batchnorm_updates, cross_entropy_mean, top1acc, topnacc = self.multigpu_grads()
+            grads, last_grads, batchnorm_updates, cross_entropy_mean = self.multigpu_grads()
 
         # Setup the train operation
         if self.transfer_mode[0] == 1:
@@ -198,7 +205,7 @@ class model:
                                lambda: tf.group(self.optimizer.apply_gradients(last_grads), *batchnorm_updates),
                                lambda: tf.group(self.optimizer.apply_gradients(grads), *batchnorm_updates))
 
-        return [train_op, cross_entropy_mean, top1acc, topnacc]
+        return [train_op, cross_entropy_mean]
 
     """
       This method build a specefic architecture.
@@ -222,6 +229,8 @@ class model:
             return googlenet(self.inputs, self.num_classes, self.wd, tf.where(self.is_training, 0.4, 1.0), self.is_training)
         elif self.architecture.lower() == 'nin':
             return nin(self.inputs, self.num_classes, self.wd, self.is_training)
+        elif self.architecture.lower() == 'deepspeech':
+            return deepspeech(self.inputs, self.num_chars, self.wd, self.is_training)
 
     """
       This method returns the necessary operations to run for evaluating the network.

@@ -15,7 +15,7 @@ import numpy as np
 
 import tensorflow as tf
 
-from data_loader import loader
+from data_loader import Loader
 from architectures.model import model
 from architectures.common import SAVE_VARIABLES
 import sys
@@ -39,13 +39,17 @@ def do_train(sess, args):
     with tf.device('/cpu:0'):
 
         # Images and labels placeholders
-        images_ph = tf.placeholder(tf.float32, shape=(None,) + tuple(args.processed_size), name='input')
-        labels_ph = tf.placeholder(tf.int32, shape=(None), name='label')
+        # images_ph = tf.placeholder(tf.float32, shape=(None,) + tuple(args.processed_size), name='input')
+        images_ph = tf.placeholder(tf.float32, shape=None, name='input')
+        labels_ph = tf.placeholder(tf.int32, shape=None, name='label')
+        max_seq_len_ph = tf.placeholder(tf.int32, shape=None, name='max_seq_len')
+        label_length_batch_ph = tf.placeholder(tf.int32, shape=None, name='label_length_batch')
 
         # a placeholder for determining if we train or validate the network. This placeholder will be used to set dropout rates and batchnorm paramaters.
         is_training_ph = tf.placeholder(tf.bool, name='is_training')
 
         # epoch number
+        # 值得一看
         epoch_number = tf.get_variable('epoch_number', [], dtype=tf.int32, initializer=tf.constant_initializer(0), trainable=False,
                                        collections=[tf.GraphKeys.GLOBAL_VARIABLES, SAVE_VARIABLES])
         global_step = tf.get_variable('global_step', [], dtype=tf.int32, initializer=tf.constant_initializer(0), trainable=False,
@@ -55,14 +59,12 @@ def do_train(sess, args):
         wd = utils.get_policy(args.WD_policy, args.WD_details)
 
         # Learning rate decay policy (if needed)
-        lr = utils.get_policy(args.LR_policy, args.LR_details)
+        # lr = utils.get_policy(args.LR_policy, args.LR_details)
+        # TODO: 可能有问题
+        lr = 0.0001
 
         # Create an optimizer that performs gradient descent.
         optimizer = utils.get_optimizer(args.optimizer, lr)
-
-        # build the computational graph using the provided configuration.
-        dnn_model = model(images_ph, labels_ph, utils.loss, optimizer, wd, args.architecture, args.depth, args.num_classes, is_training_ph,
-                          args.transfer_mode, num_gpus=args.num_gpus)
 
         # Create a pipeline to read data from disk
         # a placeholder for setting the input pipeline batch size. This is employed to ensure that we feed each validation example only once to the network.
@@ -70,16 +72,24 @@ def do_train(sess, args):
         batch_size_tf = tf.placeholder_with_default(min(512, args.batch_size), shape=())
 
         # A data loader pipeline to read training images and their labels
-        train_loader = loader(args.train_info, args.delimiter, args.raw_size, args.processed_size, True, args.chunked_batch_size,
+        train_loader = Loader(args.train_info, args.delimiter, args.raw_size, args.processed_size, True, args.chunked_batch_size,
                               args.num_prefetch, args.num_threads, args.path_prefix, args.shuffle)
         # The loader returns images, their labels, and their paths
-        images, labels, info = train_loader.load()
+        # images, labels, info = train_loader.load()
+        mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch, max_seq_len, label_length_batch = train_loader.load()
+
+        # build the computational graph using the provided configuration.
+        dnn_model = model(images_ph, labels_ph, utils.loss, optimizer, wd,
+                          args.architecture, args.depth, args.num_chars, args.num_classes,
+                          is_training_ph, max_seq_len_ph, label_length_batch_ph,
+                          args.transfer_mode, num_gpus=args.num_gpus)
 
         # If validation data are provided, we create an input pipeline to load the validation data
         if args.run_validation:
-            val_loader = loader(args.val_info, args.delimiter, args.raw_size, args.processed_size, False, batch_size_tf, args.num_prefetch,
+            val_loader = Loader(args.val_info, args.delimiter, args.raw_size, args.processed_size, False, batch_size_tf, args.num_prefetch,
                                 args.num_threads, args.path_prefix)
-            val_images, val_labels, val_info = val_loader.load()
+            # TODO: uncomment
+            # val_images, val_labels, val_info = val_loader.load()
 
         # Get training operations to run from the deep learning model
         train_ops = dnn_model.train_ops()
@@ -115,12 +125,18 @@ def do_train(sess, args):
                 start_time = time.time()
 
                 # load a batch from input pipeline
-                img, lbl = sess.run([images, labels], options=args.run_options, run_metadata=args.run_metadata)
+                # img, lbl = sess.run([images, labels], options=args.run_options, run_metadata=args.run_metadata)
+                mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch, max_seq_len, label_length_batch \
+                    = sess.run([mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch, max_seq_len, label_length_batch],
+                               options=args.run_options, run_metadata=args.run_metadata)
 
                 # train on the loaded batch of data
-                _, loss_value, top1_accuracy, topn_accuracy = sess.run(train_ops,
-                                                                       feed_dict={images_ph: img, labels_ph: lbl, is_training_ph: True},
-                                                                       options=args.run_options, run_metadata=args.run_metadata)
+                _, loss_value, top1_accuracy, topn_accuracy = \
+                    sess.run(train_ops,
+                             feed_dict={images_ph: mfcc_feat_batch, labels_ph: label_batch,
+                                        max_seq_len_ph: max_seq_len, label_length_batch_ph: label_length_batch,
+                                        is_training_ph: True},
+                             options=args.run_options, run_metadata=args.run_metadata)
                 duration = time.time() - start_time
 
                 # Check for errors
@@ -136,14 +152,18 @@ def do_train(sess, args):
                     format_str = ('%s: epoch %d, step %d, loss = %.2f, Top-1 = %.2f Top-' + str(
                         args.top_n) + ' = %.2f (%.1f examples/sec; %.3f sec/batch)')
                     print(format_str % (
-                    datetime.now(), epoch, step, loss_value, top1_accuracy, topn_accuracy, examples_per_sec, sec_per_batch))
+                        datetime.now(), epoch, step, loss_value, top1_accuracy, topn_accuracy, examples_per_sec, sec_per_batch))
                     sys.stdout.flush()
 
                 if step % 100 == 0:
-                    summary_str = sess.run(tf.summary.merge_all(), feed_dict={images_ph: img, labels_ph: lbl, is_training_ph: True})
+                    summary_str = sess.run(tf.summary.merge_all(),
+                                           feed_dict={images_ph: mfcc_feat_batch, labels_ph: label_batch,
+                                                      max_seq_len_ph: max_seq_len, label_length_batch_ph: label_length_batch,
+                                                      is_training_ph: True})
                     summary_writer.add_summary(summary_str, args.num_batches * epoch + step)
-                    if args.log_debug_info:
-                        summary_writer.add_run_metadata(run_metadata, 'epoch%d step%d' % (epoch, step))
+                    # TODO:这里好像有bug
+                    # if args.log_debug_info:
+                    #     summary_writer.add_run_metadata(run_metadata, 'epoch%d step%d' % (epoch, step))
 
             # Save the model checkpoint periodically after each training epoch
             checkpoint_path = os.path.join(args.log_dir, args.snapshot_prefix)
@@ -155,6 +175,7 @@ def do_train(sess, args):
             if args.run_validation:
 
                 print("Evaluating on validation set")
+                """
 
                 true_predictions_count = 0  # Counts the number of correct predictions
                 true_topn_predictions_count = 0  # Counts the number of top-n correct predictions
@@ -186,6 +207,7 @@ def do_train(sess, args):
                       (all_count, total_loss / all_count, true_predictions_count / all_count, args.top_n,
                        true_topn_predictions_count / all_count))
                 sys.stdout.flush()
+                """
 
         coord.request_stop()
         coord.join(threads)
@@ -214,7 +236,8 @@ def do_evaluate(sess, args):
         is_training_ph = tf.placeholder(tf.bool, name='is_training')
 
         # build a deep learning model using the provided configuration
-        dnn_model = model(images_ph, labels_ph, utils.loss, None, 0.0, args.architecture, args.depth, args.num_classes, is_training_ph,
+        dnn_model = model(images_ph, labels_ph, utils.loss, None, 0.0, args.architecture, args.depth, args.num_chars, args.num_classes,
+                          is_training_ph,
                           args.transfer_mode)
 
         # creating an input pipeline to read data from disk
@@ -222,7 +245,7 @@ def do_evaluate(sess, args):
         batch_size_tf = tf.placeholder_with_default(args.batch_size, shape=())
 
         # a data loader pipeline to read test data
-        val_loader = loader(args.val_info, args.delimiter, args.raw_size, args.processed_size, False, batch_size_tf, args.num_prefetch,
+        val_loader = Loader(args.val_info, args.delimiter, args.raw_size, args.processed_size, False, batch_size_tf, args.num_prefetch,
                             args.num_threads,
                             args.path_prefix, inference_only=args.inference_only)
 
@@ -356,6 +379,8 @@ def main():  # pylint: disable=unused-argument
     parser.add_argument('--max_to_keep', default=5, type=int, action='store', help='Maximum number of snapshot files to keep')
     parser.add_argument('--save_predictions', default='predictions.csv', action='store',
                         help='Save top-n predictions of the networks along with their confidence in the specified file')
+    # TODO: 动态
+    parser.add_argument('--num_chars', default=0, type=int, help='')
     args = parser.parse_args()
 
     # Spliting examples between different GPUs

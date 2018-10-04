@@ -13,7 +13,7 @@ import tensorflow as tf
 """
 
 
-class loader:
+class Loader:
     """
      Constructor. it gathers the necessary information to build a data loader pipeline.
      For more details, please read inline comments below.
@@ -57,6 +57,7 @@ class loader:
        two lists for imag paths and their labels.
     """
 
+    # 我们不需要这个函数
     def _read_label_file(self):
         f = open(self.input_file, "r")
         filepaths = []
@@ -121,41 +122,113 @@ class loader:
       image and label batches
     """
 
+    # def load(self):
+    #     # read and parse the input file
+    #     filepaths, labels = self._read_label_file()
+    #
+    #     # add path prefix to all image paths
+    #     filenames = [os.path.join(self.path_prefix, i) for i in filepaths]
+    #
+    #     # Create a queue that produces the filenames to read.
+    #     if not self.inference_only:
+    #         # amke FIFO queue of file paths and their labels
+    #         filename_queue = tf.train.slice_input_producer([filenames, labels], shuffle=self.shuffle if self.is_training else False)
+    #
+    #         image_queue = filename_queue[0]
+    #         label_queue = filename_queue[1]
+    #
+    #         # prprocess images
+    #         reshaped_image = self.preprocess(image_queue)
+    #
+    #         # label
+    #         label = tf.cast(label_queue, tf.int64)
+    #         img_info = image_queue
+    #
+    #         print('Filling queue with %d images before starting to train. '
+    #               'This may take some times.' % self.num_prefetch)
+    #
+    #         # Load images and labels with additional info and return batches
+    #         return tf.train.batch(
+    #             [reshaped_image, label, img_info],
+    #             batch_size=self.batch_size,
+    #             num_threads=self.num_threads,
+    #             capacity=self.num_prefetch,
+    #             allow_smaller_final_batch=True if not self.is_training else False)
+    #
+    #     else:
+    #
+    #         filename_queue = tf.train.slice_input_producer([filenames], shuffle=self.shuffle if self.is_training else False)
+    #         image_queue = filename_queue[0]
+    #         reshaped_image = self.preprocess(image_queue)
+    #         img_info = image_queue
+    #
+    #         print('Filling queue with %d images before starting to train. '
+    #               'This may take some times.' % self.num_prefetch)
+    #
+    #         # Load images and labels with additional info and return batches
+    #         return tf.train.batch(
+    #             [reshaped_image, img_info],
+    #             batch_size=self.batch_size,
+    #             num_threads=self.num_threads,
+    #             capacity=self.num_prefetch,
+    #             allow_smaller_final_batch=True if not self.is_training else False)
+
     def load(self):
-        # read and parse the input file
-        filepaths, labels = self._read_label_file()
-
-        # add path prefix to all image paths
-        filenames = [os.path.join(self.path_prefix, i) for i in filepaths]
-
         # Create a queue that produces the filenames to read.
         if not self.inference_only:
-            # amke FIFO queue of file paths and their labels
-            filename_queue = tf.train.slice_input_producer([filenames, labels], shuffle=self.shuffle if self.is_training else False)
+            # output file name string to a queue
+            # TODO：改掉路径
+            filename_queue = tf.train.string_input_producer(['./TFRecords/train/train.tfrecords'], num_epochs=None, shuffle=True)
+            # create a reader from file queue
+            reader = tf.TFRecordReader()
+            _, serialized_example = reader.read(filename_queue)
+            features = tf.parse_single_example(serialized_example,
+                                               features={
+                                                   'label': tf.VarLenFeature(tf.int64),
+                                                   'label_length': tf.VarLenFeature(tf.int64),
+                                                   'mfcc_feat': tf.VarLenFeature(tf.float32),
+                                                   'feat_shape': tf.VarLenFeature(tf.int64),
+                                                   'seq_len': tf.VarLenFeature(tf.int64)
+                                               })
+            label = tf.sparse_tensor_to_dense(features['label'])
+            label = tf.cast(tf.reshape(label, [-1, ]), tf.int32)
 
-            image_queue = filename_queue[0]
-            label_queue = filename_queue[1]
+            # print('label in data_loader: {}'.format(label))
+            label_length = tf.sparse_tensor_to_dense(features['label_length'])
+            label_length = tf.cast(features['label_length'], tf.int32)
 
-            # prprocess images
-            reshaped_image = self.preprocess(image_queue)
+            feat_shape = tf.sparse_tensor_to_dense(features['feat_shape'])
+            feat_shape = tf.cast(feat_shape, tf.int32)
+            # print('feat_shape in data_loader: {}'.format(feat_shape))
 
-            # label
-            label = tf.cast(label_queue, tf.int64)
-            img_info = image_queue
+            seq_len = tf.sparse_tensor_to_dense(features['seq_len'])
+            seq_len = tf.cast(seq_len, tf.int32)
+            # print(seq_len)
 
-            print('Filling queue with %d images before starting to train. '
-                  'This may take some times.' % self.num_prefetch)
+            mfcc_feat = tf.sparse_tensor_to_dense(features['mfcc_feat'])
+            # print(mfcc_feat)
+            # mfcc_feat = tf.reshape(mfcc_feat, feat_shape)
+            mfcc_feat = tf.reshape(mfcc_feat, [-1, 26])
+            mfcc_feat = tf.expand_dims(mfcc_feat, axis=2)
+            # print(mfcc_feat)
 
-            # Load images and labels with additional info and return batches
-            return tf.train.batch(
-                [reshaped_image, label, img_info],
+            mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch, label_length_batch = tf.train.batch(
+                [mfcc_feat, label, feat_shape, seq_len, label_length],
                 batch_size=self.batch_size,
+                allow_smaller_final_batch=True if not self.is_training else False,
                 num_threads=self.num_threads,
-                capacity=self.num_prefetch,
-                allow_smaller_final_batch=True if not self.is_training else False)
+                dynamic_pad=True,
+                capacity=1024)
+            max_seq_len = tf.reduce_max(seq_len_batch, axis=0)
+            max_seq_len = tf.reshape(max_seq_len, [1, ])
+            # max_seq_len = tf.cast(max_seq_len, tf.float32)
+            # print('max_seq_len: {}'.format(max_seq_len))
+            # print(mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch)
+            # return mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch, max_seq_len
 
+            return mfcc_feat_batch, label_batch, feat_shape_batch, seq_len_batch, max_seq_len, label_length_batch
         else:
-
+            """
             filename_queue = tf.train.slice_input_producer([filenames], shuffle=self.shuffle if self.is_training else False)
             image_queue = filename_queue[0]
             reshaped_image = self.preprocess(image_queue)
@@ -171,6 +244,8 @@ class loader:
                 num_threads=self.num_threads,
                 capacity=self.num_prefetch,
                 allow_smaller_final_batch=True if not self.is_training else False)
+            """
+            pass
 
     """
      This method applies different data aufmentation techniques to an input image

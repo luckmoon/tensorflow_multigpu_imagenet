@@ -13,7 +13,7 @@ def _get_variable(name,
                   regularizer=None,
                   dtype='float',
                   trainable=True):
-    "A little wrapper around tf.get_variable to do weight decay and add to"
+    """A little wrapper around tf.get_variable to do weight decay and add to"""
     "SAVE collection"
     collections = [tf.GraphKeys.GLOBAL_VARIABLES, SAVE_VARIABLES]
     with tf.device('/cpu:0'):
@@ -131,3 +131,40 @@ def avgPool(x, ksize, stride, padding='SAME'):
                           ksize=[1, ksize, ksize, 1],
                           strides=[1, stride, stride, 1],
                           padding=padding)
+
+
+def biRNN(x, n_cell_dim):
+    # Now we create the forward and backward LSTM units.
+    # Both of which have inputs of length `n_cell_dim` and bias `1.0` for the forget gate of the LSTM.
+
+    # Forward direction cell:
+    lstm_fw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+    lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(lstm_fw_cell)
+                                                #input_keep_prob=1.0 - dropout[3],
+                                                #output_keep_prob=1.0 - dropout[3],
+                                                #seed=FLAGS.random_seed)
+    # Backward direction cell:
+    lstm_bw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+    lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(lstm_bw_cell)
+                                                #input_keep_prob=1.0 - dropout[4],
+                                                #output_keep_prob=1.0 - dropout[4],
+                                                #seed=FLAGS.random_seed)
+
+    # `layer_3` is now reshaped into `[n_steps, batch_size, 2*n_cell_dim]`,
+    # as the LSTM BRNN expects its input to be of shape `[max_time, batch_size, input_size]`.
+    # layer_3 = tf.reshape(layer_3, [-1, batch_x_shape[0], n_hidden_3])
+
+    # Now we feed `layer_3` into the LSTM BRNN cell and obtain the LSTM BRNN output.
+    outputs, output_states = tf.nn.bidirectional_dynamic_rnn(cell_fw=lstm_fw_cell,
+                                                             cell_bw=lstm_bw_cell,
+                                                             inputs=x,
+                                                             dtype=tf.float32,
+                                                             time_major=True)
+                                                             #sequence_length=seq_length)
+
+    # Reshape outputs from two tensors each of shape [n_steps, batch_size, n_cell_dim]
+    # to a single tensor of shape [n_steps*batch_size, 2*n_cell_dim]
+    outputs = tf.concat(outputs, 2)
+    outputs = tf.reshape(outputs, [-1, 2*n_cell_dim])
+
+    return outputs

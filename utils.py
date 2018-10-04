@@ -2,16 +2,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from datetime import datetime
-import os.path
-import time
-
-import numpy as np
-
 import tensorflow as tf
-
-import sys
-import argparse
 
 from architectures.common import SAVE_VARIABLES
 
@@ -25,6 +16,7 @@ Returns:
 """
 
 
+# TODO: 处理成处理tfrecords的函数
 def count_input_records(filename, batch_size):
     with open(filename) as f:
         num_samples = sum(1 for line in f)
@@ -44,15 +36,43 @@ def count_input_records(filename, batch_size):
 """
 
 
-def loss(logits, labels):
-    # Calculate the average cross entropy loss across the batch.
-    cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits, name='cross_entropy_per_example')
-    cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+# def loss(logits, labels):
+#     # Calculate the average cross entropy loss across the batch.
+#     cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits, name='cross_entropy_per_example')
+#     cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+#
+#     # Add a Tensorboard summary
+#     tf.summary.scalar('Cross Entropy Loss', cross_entropy_mean)
+#
+#     return cross_entropy_mean
+def loss(logits, labels, max_seq_len, label_length_batch):
+    print(logits)  # shape=(?, 4333)
+    # TODO: not elegant
+    # Actually, this batch_size is args.batch_size // 2 due to utilizing of two-gpus.
+    # batch_size = tf.convert_to_tensor([logits.get_shape()[1]], dtype=tf.int32)
+    batch_size = tf.convert_to_tensor([labels.get_shape()[0]], dtype=tf.int32)
+    sequence_length = tf.to_int32(tf.tile(max_seq_len, batch_size))
+
+    label_lengths = tf.to_int32(tf.reshape(label_length_batch, [logits.get_shape()[1], ]))
+    labels = tf.cast(labels, tf.int32)
+    print('D before keras. ---->> label: {}\n. ----->> label_lengths: {}\n'.format(labels, label_lengths))
+
+    labels = tf.keras.backend.ctc_label_dense_to_sparse(labels=labels, label_lengths=label_lengths)
+    print('labels in ctc loss: {}'.format(labels))
+    ctc_loss = tf.nn.ctc_loss(labels=labels,
+                              inputs=logits,
+                              sequence_length=sequence_length,
+                              time_major=True,
+                              ignore_longer_outputs_than_inputs=True,
+                              ctc_merge_repeated=False,
+                              preprocess_collapse_repeated=True)
+    # print('ctc_loss: {}'.format(ctc_loss))
+    ctc_loss_mean = tf.reduce_mean(ctc_loss, name='ctc_loss_mean')
 
     # Add a Tensorboard summary
-    tf.summary.scalar('Cross Entropy Loss', cross_entropy_mean)
+    tf.summary.scalar('CTC Loss', ctc_loss_mean)
 
-    return cross_entropy_mean
+    return ctc_loss_mean, sequence_length, label_lengths, labels
 
 
 """
